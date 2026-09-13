@@ -37,7 +37,7 @@ The module panel is arranged in a 32HP single column, from top to bottom:
 7. **On-Device Preset Memory Section:** Labeled *"BEATSTEP PRESETS (device memory)"*, located at the bottom of the module:
    - **Preset Grid:** An 8×2 grid of 16 numbered slot buttons (intentionally styled smaller than the step pads to indicate secondary importance). The slot currently selected for Save/Recall is highlighted amber; the slot currently addressed by `Slot CV` (if patched) is highlighted cyan, independently of the amber selection.
    - **Buttons & Readout:** `Save -> Slot`, `Recall <- Slot`, and a `Selected: NN` indicator. *(Note: Save is manual-only to prevent accidental destructive overwrites of hardware memory via errant CV triggers).*
-   - **CV/Gate Jacks:** `Slot CV` (1V per slot, 0–15V covering slots 1–16) and `Recall Trig` (rising edge detection to trigger recalls).
+   - **CV/Gate Jacks:** `Slot CV` (1V per slot, 0–15V covering slots 1–16), `Recall Trig` (rising edge detection to trigger recalls), and `Clock` (each rising edge forwards one MIDI Clock tick to the BeatStep -- feed 24 PPQN for standard tempo sync).
 
 ---
 
@@ -88,6 +88,14 @@ The `Rnd Notes` and `Rnd Gates` buttons use ranges configurable from the module'
 
 ---
 
+## Clock Input
+
+The `Clock` jack forwards each rising edge as a single MIDI Clock byte (`0xF8`) to the BeatStep, sent through the same connection and internal lock as this module's own SysEx traffic. Feed it a 24-PPQN clock source for standard MIDI tempo sync.
+
+This exists specifically so a *separate* clock-generator module doesn't need its own MIDI OUT connection to the same physical BeatStep device: two independent things writing to one shared MIDI port race each other at the OS/driver level and can corrupt this module's own SysEx communication. Patch your clock source's CV output into this jack instead of routing a second MIDI module to the BeatStep's port.
+
+---
+
 ## Notes on Hardware Sync (Troubleshooting & Fixes)
 
 This section documents specific historical bugs and their resolutions for user troubleshooting reference:
@@ -98,6 +106,7 @@ This section documents specific historical bugs and their resolutions for user t
 - **Randomization Reverting to Old Values:** `Rnd Notes` / `Rnd Gates` used to fire up to 16 SysEx writes directly from the button click, back-to-back with no gap, on the GUI thread -- both outrunning the hardware's own receive rate (dropping writes) and racing the background poller's own concurrent reads of the same steps, either of which could make the change look like it "reverted." Both buttons now just flag the request; the actual writes happen on the poll thread itself (which is the only thread that ever touches MIDI I/O), paced ~8ms apart, so there's no burst, no race, and no GUI blocking.
 - **Slow Hardware-to-Software Feedback:** Writes (software -> hardware) are immediate, but a physical change on the hardware (turning a knob, hitting a pad) was only picked up on the poller's next full pass, and the gap between passes was up to 2 seconds (~1 second average wait). This gap is now capped much lower, so physical changes reflect back into the panel noticeably faster.
 - **Manually Turning a Knob Fought Itself:** After the poller's gap was shortened (previous point), its periodic "sync hardware state into the knobs" step started interrupting an in-progress manual knob drag -- the knob would get yanked back to the last-confirmed (already stale) hardware value faster than a manual turn could move it forward. Each global param now gets a brief grace window after a manual (or CV) change during which the poller's push is skipped for that param, giving the write its own read-back round trip time to catch up first.
+- **SysEx Reassembly Not Skipping Real-Time Bytes:** Per the MIDI spec, System Real-Time bytes (Clock `0xF8`, Start/Continue/Stop, Active Sensing, Reset) can be injected in the middle of *any* other message, including a SysEx dump in progress -- receivers are required to skip them transparently. This module's SysEx reassembly didn't; fixed by skipping the entire `0xF8-0xFF` range before any other frame-reassembly logic runs. (This alone doesn't fix a *separate* module sending clock to a shared MIDI OUT device -- see the `Clock` input below, which is the actual fix for that case.)
 - **Misleading Octave Picker Labels:** The step pad's right-click octave picker used to show absolute note names (`C0`…`C8`), which only matched what the pad actually sounds like when Transpose was at its default center -- picking "C4" with Transpose shifted elsewhere silently set the raw note to 60 without making the step sound like C4 at all. Relabeled as `Oct -4`…`Oct +4` relative to the Transpose center, each entry now also shows what it currently sounds like given the live Transpose value.
 
 ---
@@ -121,4 +130,7 @@ This section documents specific historical bugs and their resolutions for user t
 - Build using the VCV Rack SDK Makefile system (`RACK_DIR=/path/to/Rack-SDK make`), or use the bundled build script (`./build.sh` supports `build`, `install`, and `clean` subcommands).
 - **Linux Installation Path:** `~/.local/share/Rack2/plugins-lin-x64/BeatStepSync`
 - *Note:* `jq` is required as a build dependency because the VCV Rack SDK's `plugin.mk` shells out to `jq` to read metadata from `plugin.json`.
+
+---
+
 
