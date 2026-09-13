@@ -1,0 +1,16 @@
+{
+  "slug": "BeatStepSync",
+  "name": "BeatStep Sync",
+  "version": "2.0.0",
+  "license": "GPL-3.0-only",
+  "brand": "Idleness",
+  "author": "bird238",
+  "modules": [
+    {
+      "slug": "BeatStepSeq",
+      "name": "BeatStep Sequencer",
+      "description": "Two-way sync with an Arturia BeatStep hardware sequencer via SysEx MIDI, including transpose/scale/mode/swing/gate-length/legato and on-device preset recall",
+      "tags": ["Sequencer", "External"]
+    }
+  ]
+}
