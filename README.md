@@ -13,6 +13,7 @@
 - **CV Control of Global Parameters:** All 9 global parameters can be driven directly by CV (0-10V), in addition to their knobs.
 - **Configurable Randomization:** The note-octave range and gate density used by the Rnd Notes / Rnd Gates buttons are adjustable from the module's right-click menu.
 - **Robust SysEx Engine:** Built with a bounded wait-for-reply polling loop and settlement delays to ensure rock-solid hardware communication without dropped packets or race conditions.
+- **Transport Sync:** Dedicated `Clock`, `Run`, and `Reset` inputs let an external clock/transport drive the BeatStep without needing its own MIDI OUT connection to the hardware.
 - **Custom Panel Layout:** Clean, custom-drawn 32HP single-column interface designed specifically for live performance and deep hardware integration.
 
 ---
@@ -37,7 +38,7 @@ The module panel is arranged in a 32HP single column, from top to bottom:
 7. **On-Device Preset Memory Section:** Labeled *"BEATSTEP PRESETS (device memory)"*, located at the bottom of the module:
    - **Preset Grid:** An 8×2 grid of 16 numbered slot buttons (intentionally styled smaller than the step pads to indicate secondary importance). The slot currently selected for Save/Recall is highlighted amber; the slot currently addressed by `Slot CV` (if patched) is highlighted cyan, independently of the amber selection.
    - **Buttons & Readout:** `Save -> Slot`, `Recall <- Slot`, and a `Selected: NN` indicator. *(Note: Save is manual-only to prevent accidental destructive overwrites of hardware memory via errant CV triggers).*
-   - **CV/Gate Jacks:** `Slot CV` (1V per slot, 0–15V covering slots 1–16), `Recall Trig` (rising edge detection to trigger recalls), and `Clock` (each rising edge forwards one MIDI Clock tick to the BeatStep -- feed 24 PPQN for standard tempo sync).
+   - **CV/Gate Jacks** (panel labels abbreviated to fit five in one row): `Slot CV` (1V per slot, 0–15V covering slots 1–16), `Recall` (rising edge to trigger recalls), `Clk In` (rising edge forwards one MIDI Clock tick to the BeatStep -- feed 24 PPQN for standard tempo sync), `Run` (gate: high sends MIDI Continue, low sends Stop), and `Reset` (rising edge sends MIDI Start, restarting the sequence from the beginning).
 
 ---
 
@@ -88,11 +89,15 @@ The `Rnd Notes` and `Rnd Gates` buttons use ranges configurable from the module'
 
 ---
 
-## Clock Input
+## Transport & Clock Sync
 
-The `Clock` jack forwards each rising edge as a single MIDI Clock byte (`0xF8`) to the BeatStep, sent through the same connection and internal lock as this module's own SysEx traffic. Feed it a 24-PPQN clock source for standard MIDI tempo sync.
+- **Clock In:** Each rising edge sends a single MIDI Clock byte (`0xF8`) to the BeatStep. Feed it a 24-PPQN clock source for standard MIDI tempo sync.
+- **Run:** A gate input for transport control. Rising edge (gate goes high) sends MIDI Continue (`0xFB`), resuming playback from wherever the BeatStep's sequencer currently is. Falling edge (gate goes low) sends MIDI Stop (`0xFC`).
+- **Reset:** A trigger input. Each rising edge sends MIDI Start (`0xFA`), which per the MIDI spec always repositions playback to the beginning of the sequence -- use this to restart the pattern from step 1.
 
-This exists specifically so a *separate* clock-generator module doesn't need its own MIDI OUT connection to the same physical BeatStep device: two independent things writing to one shared MIDI port race each other at the OS/driver level and can corrupt this module's own SysEx communication. Patch your clock source's CV output into this jack instead of routing a second MIDI module to the BeatStep's port.
+All three are sent through the same mutex-guarded MIDI connection as this module's own SysEx traffic, specifically so a *separate* clock-generator or transport module doesn't need its own MIDI OUT connection to the same physical BeatStep device: two independent things writing to one shared MIDI port race each other at the OS/driver level and can corrupt this module's own SysEx communication. Patch your clock/transport source into these jacks instead of routing a second MIDI module to the BeatStep's port.
+
+There is no Clock Out (mirroring the BeatStep's own generated clock back as CV): the BeatStep does transmit Clock ticks back over MIDI IN when running on its own internal clock, but this module's poll loop only drains its MIDI input opportunistically (in between SysEx read/write requests), not on a steady real-time cadence -- ticks pile up irregularly and get released in uneven bursts rather than a clean, evenly-spaced pulse train. Confirmed unreliable on real hardware and removed rather than shipped half-working.
 
 ---
 
@@ -130,7 +135,5 @@ This section documents specific historical bugs and their resolutions for user t
 - Build using the VCV Rack SDK Makefile system (`RACK_DIR=/path/to/Rack-SDK make`), or use the bundled build script (`./build.sh` supports `build`, `install`, and `clean` subcommands).
 - **Linux Installation Path:** `~/.local/share/Rack2/plugins-lin-x64/BeatStepSync`
 - *Note:* `jq` is required as a build dependency because the VCV Rack SDK's `plugin.mk` shells out to `jq` to read metadata from `plugin.json`.
-
----
 
 

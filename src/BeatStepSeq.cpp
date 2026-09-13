@@ -247,7 +247,7 @@ struct BeatStepSeqModule : Module {
         SLOT_CV_INPUT, RECALL_TRIG_INPUT,
         CHANNEL_CV_INPUT, TRANSPOSE_CV_INPUT, SCALE_CV_INPUT, MODE_CV_INPUT,
         STEP_SIZE_CV_INPUT, LENGTH_CV_INPUT, SWING_CV_INPUT, GATE_LEN_CV_INPUT, LEGATO_CV_INPUT,
-        CLOCK_INPUT,
+        CLOCK_INPUT, RUN_INPUT, RESET_INPUT,
         NUM_INPUTS
     };
     enum OutputIds { NUM_OUTPUTS };
@@ -302,6 +302,8 @@ struct BeatStepSeqModule : Module {
 
     dsp::SchmittTrigger recallTrigDetector;
     dsp::SchmittTrigger clockTrigDetector;
+    dsp::SchmittTrigger runTrigDetector;
+    dsp::SchmittTrigger resetTrigDetector;
 
     BeatStepSeqModule() {
         config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
@@ -328,6 +330,8 @@ struct BeatStepSeqModule : Module {
         configInput(GATE_LEN_CV_INPUT,  "Gate length CV (0-10V = 50-99%)");
         configInput(LEGATO_CV_INPUT,    "Legato CV (0-10V = Off/On/Reset)");
         configInput(CLOCK_INPUT, "Clock (rising edge = one MIDI Clock tick to the BeatStep; feed 24 PPQN)");
+        configInput(RUN_INPUT, "Run (gate: high = Continue, low = Stop)");
+        configInput(RESET_INPUT, "Reset (rising edge = MIDI Start, restarts the sequence)");
     }
 
     ~BeatStepSeqModule() {
@@ -339,17 +343,17 @@ struct BeatStepSeqModule : Module {
         BS::sendMsg(midiOut, bytes);
     }
 
-    // Forwards a CV clock pulse as a single MIDI Clock (0xF8) byte, through the
-    // same mutex-guarded midiOut as sendSysEx -- so a separate clock-generator
-    // module no longer needs to share this module's MIDI OUT device to keep the
-    // BeatStep in tempo, which was racing against this module's own SysEx
-    // traffic at the shared MIDI port (two independent writers to one device is
-    // outside anything this module can otherwise coordinate).
-    void sendClockTick() {
+    // Sends a single System Real-Time byte (Clock 0xF8, Start 0xFA, Continue
+    // 0xFB, or Stop 0xFC) through the same mutex-guarded midiOut as sendSysEx --
+    // so a separate clock/transport source no longer needs its own MIDI OUT
+    // connection to the BeatStep to drive it, which would race this module's
+    // own SysEx traffic at the shared MIDI port (two independent writers to one
+    // device is outside anything this module can otherwise coordinate).
+    void sendRealtime(uint8_t status) {
         std::lock_guard<std::mutex> g(midiOutMtx);
         midi::Message msg;
         msg.setSize(1);
-        msg.bytes[0] = 0xF8;
+        msg.bytes[0] = status;
         midiOut.sendMessage(msg);
     }
 
@@ -523,7 +527,19 @@ struct BeatStepSeqModule : Module {
         }
 
         if (clockTrigDetector.process(inputs[CLOCK_INPUT].getVoltage())) {
-            sendClockTick();
+            sendRealtime(0xF8);
+        }
+
+        // Run: gate high runs (Continue -- resumes from wherever the BeatStep
+        // currently is, unlike Start which always rewinds), gate low stops.
+        auto runEvent = runTrigDetector.processEvent(inputs[RUN_INPUT].getVoltage());
+        if (runEvent == dsp::SchmittTrigger::TRIGGERED) sendRealtime(0xFB);
+        else if (runEvent == dsp::SchmittTrigger::UNTRIGGERED) sendRealtime(0xFC);
+
+        // Reset: MIDI Start always repositions to the beginning of the sequence
+        // (and begins playing), unlike Continue -- exactly "restart from zero".
+        if (resetTrigDetector.process(inputs[RESET_INPUT].getVoltage())) {
+            sendRealtime(0xFA);
         }
 
         // CV control of all 9 global params: each CV, when patched, maps 0-10V
@@ -1252,15 +1268,16 @@ struct BeatStepSeqWidget : ModuleWidget {
 
             float jackY = selY + 3.5f + 0.6f;
             {
-                static const char* jackLabels[3] = {"Slot CV", "Recall Trig", "Clock"};
-                static const int jackIds[3] = {
-                    BeatStepSeqModule::SLOT_CV_INPUT, BeatStepSeqModule::RECALL_TRIG_INPUT, BeatStepSeqModule::CLOCK_INPUT
+                static const char* jackLabels[5] = {"Slot CV", "Recall", "Clk In", "Run", "Reset"};
+                static const int jackIds[5] = {
+                    BeatStepSeqModule::SLOT_CV_INPUT, BeatStepSeqModule::RECALL_TRIG_INPUT, BeatStepSeqModule::CLOCK_INPUT,
+                    BeatStepSeqModule::RUN_INPUT, BeatStepSeqModule::RESET_INPUT
                 };
-                float colW = CONTENT_W / 3.f;
-                for (int i = 0; i < 3; i++) {
+                float colW = CONTENT_W / 5.f;
+                for (int i = 0; i < 5; i++) {
                     auto* lbl = new TinyLabel;
                     lbl->text = jackLabels[i];
-                    lbl->fontSize = 7.f;
+                    lbl->fontSize = 6.f;
                     lbl->align = NVG_ALIGN_CENTER;
                     lbl->box.pos = mm2px(Vec(CONTENT_X + i * colW, jackY));
                     lbl->box.size = mm2px(Vec(colW, 3.5f));
@@ -1272,7 +1289,7 @@ struct BeatStepSeqWidget : ModuleWidget {
             }
 
             auto* note = new TinyLabel;
-            note->text = "Slot CV 1V/slot 0-15V; Recall on Trig edge; Clock: 1 edge = 1 MIDI tick (24 PPQN)";
+            note->text = "Slot CV 1V/slot 0-15V; Recall/Reset on edge; Run gate=Continue/Stop; Clk In: 1 edge = 1 MIDI tick";
             note->fontSize = 5.f;
             note->align = NVG_ALIGN_CENTER;
             note->color = nvgRGBA(0x23, 0x26, 0x2a, 0xa0);
