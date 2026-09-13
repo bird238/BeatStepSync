@@ -276,10 +276,24 @@ struct BeatStepSeqModule : Module {
     // (potentially thousands/sec), flooding the USB-MIDI link to the hardware.
     float cvGlobalTimer[9] = {};
 
+    // Countdown (seconds) per global param, indexed directly by BS::GlobalParam
+    // (1-9, index 0 unused). Set whenever WE just wrote a new value (manual
+    // knob turn or CV), so the poll thread's "push hardware state into the
+    // knobs" step (below in process()) leaves that knob alone until the
+    // write+read-back round trip has had a chance to catch up. Without this,
+    // a knob being dragged gets yanked back to the last-confirmed (now stale)
+    // hardware value every poll pass -- worse the faster the poller runs.
+    float knobTouchGrace[10] = {};
+
     std::thread       pollThread;
     std::atomic<bool> pollRunning{false};
     std::atomic<bool> immediateRefresh{false};
     std::atomic<bool> pendingRecallSettle{false};
+    // 0 = none, 1 = Rnd Notes, 2 = Rnd Gates. Handled by the poll thread itself
+    // (not sent directly from the GUI button click) so the burst of writes
+    // can't race against the poller's own concurrent reads of the same steps --
+    // only one thread ever touches midiOut/midiIn at a time this way.
+    std::atomic<int> pendingRandomize{0};
 
     std::mutex           rxMtx;
     std::vector<uint8_t> rxBuf;
@@ -405,7 +419,37 @@ struct BeatStepSeqModule : Module {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
 
-                if (midiOut.getDeviceId() >= 0) {
+                int rj = pendingRandomize.exchange(0);
+                if (rj != 0 && midiOut.getDeviceId() >= 0) {
+                    std::mt19937 rng(std::random_device{}());
+                    int len = state.getLen();
+                    if (rj == 1) {
+                        int lo = std::min(randNoteOctMin, randNoteOctMax);
+                        int hi = std::max(randNoteOctMin, randNoteOctMax);
+                        std::uniform_int_distribution<int> dist((lo + 1) * 12, (hi + 1) * 12);
+                        for (int i = 0; i < len && pollRunning; i++) {
+                            uint8_t n = (uint8_t)dist(rng);
+                            state.setNote(i, n);
+                            sendSysEx(BS::writeNote(i, n));
+                            // Paced, not back-to-back: an unpaced burst of up to 16
+                            // writes can outrun the hardware's own SysEx receive/
+                            // processing rate, silently dropping some.
+                            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+                        }
+                    } else {
+                        std::bernoulli_distribution dist(randGateDensityPct / 100.0);
+                        for (int i = 0; i < len && pollRunning; i++) {
+                            bool g = dist(rng);
+                            state.setGate(i, g);
+                            sendSysEx(BS::writeGate(i, g));
+                            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+                        }
+                    }
+                    immediateRefresh = true;
+                    continue;
+                }
+
+                if (midiOut.getDeviceId() >= 0 && midiIn.getDeviceId() >= 0) {
                     for (int i = 0; i < BS::NUM_STEPS && pollRunning; i++) {
                         sendSysEx(BS::readNote(i));
                         waitForReply();
@@ -486,24 +530,37 @@ struct BeatStepSeqModule : Module {
             state.setGlobal(b.kind, v);
             sendSysEx(BS::writeGlobal(b.kind, (uint8_t)v));
             paramQuantities[b.paramId]->setValue(v);
+            knobTouchGrace[(int)b.kind] = 0.5f;
         }
+
+        for (int i = 1; i <= 9; i++)
+            if (knobTouchGrace[i] > 0.f) knobTouchGrace[i] -= args.sampleTime;
 
         if (stateChanged.exchange(false)) {
             for (int i = 0; i < BS::NUM_STEPS; i++)
                 lights[GATE_LIGHT + i].setBrightness(state.getGate(i) ? 1.f : 0.f);
 
             // Push synced values into the knobs so they track the hardware instead
-            // of silently going stale; each knob's onChange compares against
-            // state before re-sending, so this doesn't echo a write back out.
-            paramQuantities[CHANNEL_PARAM]->setValue(state.getGlobal(BS::GP_CHANNEL));
-            paramQuantities[TRANSPOSE_PARAM]->setValue(state.getGlobal(BS::GP_TRANSPOSE));
-            paramQuantities[SCALE_PARAM]->setValue(state.getGlobal(BS::GP_SCALE));
-            paramQuantities[MODE_PARAM]->setValue(state.getGlobal(BS::GP_MODE));
-            paramQuantities[STEP_SIZE_PARAM]->setValue(state.getGlobal(BS::GP_STEP_SIZE));
-            paramQuantities[PATTERN_LENGTH_PARAM]->setValue(state.getGlobal(BS::GP_LENGTH));
-            paramQuantities[SWING_PARAM]->setValue(state.getGlobal(BS::GP_SWING));
-            paramQuantities[GATE_LEN_PARAM]->setValue(state.getGlobal(BS::GP_GATE_LEN));
-            paramQuantities[LEGATO_PARAM]->setValue(state.getGlobal(BS::GP_LEGATO));
+            // of silently going stale; each knob's onChange compares against state
+            // before re-sending, so this doesn't echo a write back out. Skipped
+            // per-param for a short grace window after WE just wrote that param
+            // (manual knob turn or CV) -- otherwise, with the poller now running
+            // every ~100ms, this push can yank a knob back to the last-confirmed
+            // (already stale) hardware value faster than a manual drag can move
+            // it forward, before the write+read-back round trip has caught up.
+            auto pushIfIdle = [&](BS::GlobalParam kind, int paramId) {
+                if (knobTouchGrace[(int)kind] > 0.f) return;
+                paramQuantities[paramId]->setValue(state.getGlobal(kind));
+            };
+            pushIfIdle(BS::GP_CHANNEL,   CHANNEL_PARAM);
+            pushIfIdle(BS::GP_TRANSPOSE, TRANSPOSE_PARAM);
+            pushIfIdle(BS::GP_SCALE,     SCALE_PARAM);
+            pushIfIdle(BS::GP_MODE,      MODE_PARAM);
+            pushIfIdle(BS::GP_STEP_SIZE, STEP_SIZE_PARAM);
+            pushIfIdle(BS::GP_LENGTH,    PATTERN_LENGTH_PARAM);
+            pushIfIdle(BS::GP_SWING,     SWING_PARAM);
+            pushIfIdle(BS::GP_GATE_LEN,  GATE_LEN_PARAM);
+            pushIfIdle(BS::GP_LEGATO,    LEGATO_PARAM);
         }
     }
 
@@ -556,6 +613,46 @@ struct GlobalParamKnob : RoundSmallBlackKnob {
         if (v == bsModule->state.getGlobal(kind)) return;
         bsModule->state.setGlobal(kind, v);
         bsModule->sendSysEx(BS::writeGlobal(kind, (uint8_t)v));
+        bsModule->knobTouchGrace[(int)kind] = 0.5f;
+    }
+    // Rack's default scroll behavior scales the step by the param's whole range,
+    // so a single wheel tick can jump many steps on a wide-range param (or barely
+    // move at all on a narrow one). One tick = exactly one integer step instead,
+    // regardless of range.
+    void onHoverScroll(const HoverScrollEvent& e) override {
+        ParamQuantity* pq = getParamQuantity();
+        if (!pq) return;
+        float delta = (e.scrollDelta.y > 0.f) ? 1.f : -1.f;
+        pq->setValue(pq->getValue() + delta);
+        e.consume(this);
+    }
+    // Same idea for drag: Rack's default also scales pixels-per-step by the
+    // param's range. Step by a fixed pixel distance instead -- but that distance
+    // is itself scaled so a full sweep of the range always takes a similar total
+    // drag distance, regardless of how many states there are. Otherwise a
+    // uniform fixed step (e.g. 8px) makes few-state params (Legato: 3, Mode: 4)
+    // feel far too sensitive -- their whole range covers barely 1-2cm of drag.
+    float dragAccum = 0.f;
+    void onDragStart(const DragStartEvent& e) override {
+        dragAccum = 0.f;
+        RoundSmallBlackKnob::onDragStart(e);
+    }
+    void onDragMove(const DragMoveEvent& e) override {
+        ParamQuantity* pq = getParamQuantity();
+        if (pq) {
+            float numSteps = std::max(1.f, pq->getRange());
+            float pxPerStep = clamp(160.f / numSteps, 8.f, 40.f);
+            dragAccum += -e.mouseDelta.y;
+            while (dragAccum >= pxPerStep) {
+                pq->setValue(pq->getValue() + 1.f);
+                dragAccum -= pxPerStep;
+            }
+            while (dragAccum <= -pxPerStep) {
+                pq->setValue(pq->getValue() - 1.f);
+                dragAccum += pxPerStep;
+            }
+        }
+        ParamWidget::onDragMove(e);
     }
 };
 
@@ -679,13 +776,15 @@ struct StepWidget : OpaqueWidget {
         menu->addChild(createMenuLabel(string::f("Step %02d - raw %s, sounds %s",
             stepIndex + 1, BS::noteName(rawNote).c_str(), BS::noteName(soundsNote).c_str())));
 
+        BeatStepSeqModule* mod = module;
+        int step = stepIndex;
         bool gate = module->state.getGate(stepIndex);
         menu->addChild(createMenuItem(
             gate ? "Gate ON  -> turn off" : "Gate OFF -> turn on", "",
-            [this, gate]() {
+            [mod, step, gate]() {
                 bool ng = !gate;
-                module->state.setGate(stepIndex, ng);
-                module->sendSysEx(BS::writeGate(stepIndex, ng));
+                mod->state.setGate(step, ng);
+                mod->sendSysEx(BS::writeGate(step, ng));
             }
         ));
 
@@ -698,10 +797,9 @@ struct StepWidget : OpaqueWidget {
             std::string octLabel = relOct == 0 ? std::string("0") : string::f("%+d", relOct);
             menu->addChild(createMenuItem(
                 string::f("Oct %s -> sounds %s", octLabel.c_str(), BS::noteName(sounds).c_str()), "",
-                [this, noteForOct]() {
-                    uint8_t n = noteForOct;
-                    module->state.setNote(stepIndex, n);
-                    module->sendSysEx(BS::writeNote(stepIndex, n));
+                [mod, step, noteForOct]() {
+                    mod->state.setNote(step, noteForOct);
+                    mod->sendSysEx(BS::writeNote(step, noteForOct));
                 }
             ));
         }
@@ -973,25 +1071,11 @@ struct BeatStepSeqWidget : ModuleWidget {
             btn->label = "Rnd Notes";
             btn->box.pos = mm2px(Vec(CONTENT_X, btnY));
             btn->box.size = mm2px(Vec(btnW, btnH));
-            btn->action = [module]() {
-                if (!module) return;
-                std::mt19937 rng(std::random_device{}());
-                int lo = std::min(module->randNoteOctMin, module->randNoteOctMax);
-                int hi = std::max(module->randNoteOctMin, module->randNoteOctMax);
-                std::uniform_int_distribution<int> dist((lo + 1) * 12, (hi + 1) * 12);
-                int len = module->state.getLen();
-                for (int i = 0; i < len; i++) {
-                    uint8_t n = (uint8_t)dist(rng);
-                    module->state.setNote(i, n);
-                    module->sendSysEx(BS::writeNote(i, n));
-                    // Paced, not back-to-back: an unpaced burst of up to 16 writes
-                    // can outrun the hardware's own SysEx receive/processing rate,
-                    // silently dropping some -- the poller's next pass then reads
-                    // the old, un-written value back, looking like the change
-                    // "reverted."
-                    std::this_thread::sleep_for(std::chrono::milliseconds(8));
-                }
-            };
+            // Handed off to the poll thread (see pendingRandomize in startPoller())
+            // rather than sent here directly: writing 16 steps one by one would
+            // otherwise both block the GUI thread for its whole duration and race
+            // the poller's own concurrent reads of the same steps.
+            btn->action = [module]() { if (module) module->pendingRandomize = 1; };
             addChild(btn);
         }
         {
@@ -999,18 +1083,7 @@ struct BeatStepSeqWidget : ModuleWidget {
             btn->label = "Rnd Gates";
             btn->box.pos = mm2px(Vec(CONTENT_X + btnW + 5.f, btnY));
             btn->box.size = mm2px(Vec(btnW, btnH));
-            btn->action = [module]() {
-                if (!module) return;
-                std::mt19937 rng(std::random_device{}());
-                std::bernoulli_distribution dist(module->randGateDensityPct / 100.0);
-                int len = module->state.getLen();
-                for (int i = 0; i < len; i++) {
-                    bool g = dist(rng);
-                    module->state.setGate(i, g);
-                    module->sendSysEx(BS::writeGate(i, g));
-                    std::this_thread::sleep_for(std::chrono::milliseconds(8));
-                }
-            };
+            btn->action = [module]() { if (module) module->pendingRandomize = 2; };
             addChild(btn);
         }
         {
