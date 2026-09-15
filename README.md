@@ -13,7 +13,7 @@
 - **CV Control of Global Parameters:** All 9 global parameters can be driven directly by CV (0-10V), in addition to their knobs.
 - **Configurable Randomization:** The note-octave range and gate density used by the Rnd Notes / Rnd Gates buttons are adjustable from the module's right-click menu.
 - **Robust SysEx Engine:** Built with a bounded wait-for-reply polling loop and settlement delays to ensure rock-solid hardware communication without dropped packets or race conditions.
-- **Transport Sync:** Dedicated `Clock`, `Run`, and `Reset` inputs let an external clock/transport drive the BeatStep without needing its own MIDI OUT connection to the hardware.
+- **Transport Sync:** Dedicated `Clock`, `Run`, and `Reset` inputs let an external clock/transport drive the BeatStep.
 - **Custom Panel Layout:** Clean, custom-drawn 32HP single-column interface designed specifically for live performance and deep hardware integration.
 
 ---
