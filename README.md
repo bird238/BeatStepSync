@@ -28,8 +28,8 @@ The module panel is arranged in a 32HP single column, from top to bottom:
    - **Display:** Each pad shows its step number (top-left) and the actual sounding note name (e.g., `C4`), which incorporates the current Transpose knob offset applied to the raw stored note. A small dot at the bottom-right indicates gate status (filled green = gate on).
    - **Interactions:** Left-click toggles the gate; using the scroll wheel over a pad nudges its raw note by ±1 semitone; right-click opens a context menu to toggle the gate or jump the raw note to any octave, labeled `Oct -4`…`Oct +4` relative to the Transpose center (`Oct 0`), each showing what it currently sounds like given the live Transpose value.
 4. **Utility Buttons:** Positioned directly beneath the step grid:
-   - **Rnd Notes:** Randomizes notes for all active steps within the C2–C5 range.
-   - **Rnd Gates:** Randomizes gate states at approximately 60% density.
+   - **Rnd Notes:** Randomizes notes
+   - **Rnd Gates:** Randomizes gate
    - **Refresh:** Forces an immediate extra polling pass to re-sync state.
 5. **Global Parameters:** A single row of 9 small knobs representing the global sequencer settings. Each knob has its name centered directly above it and its live value centered directly below it for clear association:
    - `Channel`, `Transpose`, `Scale`, `Mode`, `Step sz`, `Length`, `Swing`, `Gate len`, `Legato`.
@@ -94,10 +94,6 @@ The `Rnd Notes` and `Rnd Gates` buttons use ranges configurable from the module'
 - **Clock In:** Each rising edge sends a single MIDI Clock byte (`0xF8`) to the BeatStep. Feed it a 24-PPQN clock source for standard MIDI tempo sync.
 - **Run:** A gate input for transport control. Rising edge (gate goes high) sends MIDI Continue (`0xFB`), resuming playback from wherever the BeatStep's sequencer currently is. Falling edge (gate goes low) sends MIDI Stop (`0xFC`).
 - **Reset:** A trigger input. Each rising edge sends MIDI Start (`0xFA`), which per the MIDI spec always repositions playback to the beginning of the sequence -- use this to restart the pattern from step 1.
-
-All three are sent through the same mutex-guarded MIDI connection as this module's own SysEx traffic, specifically so a *separate* clock-generator or transport module doesn't need its own MIDI OUT connection to the same physical BeatStep device: two independent things writing to one shared MIDI port race each other at the OS/driver level and can corrupt this module's own SysEx communication. Patch your clock/transport source into these jacks instead of routing a second MIDI module to the BeatStep's port.
-
-There is no Clock Out (mirroring the BeatStep's own generated clock back as CV): the BeatStep does transmit Clock ticks back over MIDI IN when running on its own internal clock, but this module's poll loop only drains its MIDI input opportunistically (in between SysEx read/write requests), not on a steady real-time cadence -- ticks pile up irregularly and get released in uneven bursts rather than a clean, evenly-spaced pulse train. Confirmed unreliable on real hardware and removed rather than shipped half-working.
 
 ---
 
